@@ -1,0 +1,14 @@
+# Byte-compiled / build
+__pycache__/
+*.py[cod]
+*.so
+
+# Virtual environment
+.venv/
+
+# macOS
+.DS_Store
+
+# Data & models
+data/
+models/
