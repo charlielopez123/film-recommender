@@ -2,6 +2,7 @@
 __pycache__/
 *.py[cod]
 *.so
+*.egg-info/
 
 # Virtual environment
 .venv/
@@ -12,3 +13,9 @@ __pycache__/
 # Data & models
 data/
 models/
+audience_models/
+
+stuff.ipynb
+.env
+
+test_notebooks/
