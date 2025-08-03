@@ -19,3 +19,7 @@ stuff.ipynb
 .env
 
 test_notebooks/
+
+src/comp_constants.py
+
+competition_data

@@ -1,10 +1,11 @@
 import random
 import numpy as np
-from envs.film_env import FilmRecEnv
-from q_models import LinearQModel
+from envs.film_env import FilmRecEnvH
+from old.q_models import LinearQModel
 import pandas as pd
 import pickle
-from constants import DAYS, TIMES, SEASONS
+from constants import DAYS, TIMES, SEASONS, MONTHS
+from config import settings
 
 # ——— HYPERPARAMETERS ———
 N_EPISODES    = 10_000
@@ -16,15 +17,15 @@ def sample_context():
     return {
         "day":    random.choice(DAYS),
         "time":   random.choice(TIMES),
-        "season": random.choice(SEASONS)
+        "month": random.choice(MONTHS)
     }
 
 # ——— SETUP ———
 catalog_df = pd.read_pickle("data/catalog_df.pkl")            # load your DataFrame
-with open("data/audience_models/rf_model.pkl", "rb") as f:    # load your frozen viewership model
+with open(settings.aud_model_dir/"rf_model.pkl", "rb") as f:    # load your frozen viewership model
     audience_model = pickle.load(f)
 
-env = FilmRecEnv(
+env = FilmRecEnvH(
     catalog_df=catalog_df,
     audience_model=audience_model,
     memory_size=5,

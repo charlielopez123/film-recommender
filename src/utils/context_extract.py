@@ -55,12 +55,13 @@ def context2dict(context: dict) -> dict:
 
     d['hour'] = TIMES2HOURS[context['time']]
     #d['month'] = day.month
+    d['month'] = MONTHS.index(context['month'])+1 # Starting at January is 1
     #d['year'] = day.year
     #d['doy'] = day.timetuple().tm_yday
     d['is_weekend'] = 1 if d['weekday'] > 3 else 0
     #d['public_holiday'] = 1 if is_public_holiday(day, holidays) else 0
-    #d['season'] = get_season(d['month'])
-    d['season'] = context['season']
+    d['season'] = get_season(d['month'])
+    #d['season'] = context['season']
 
     return d
 
@@ -124,7 +125,7 @@ def build_model_input(context: dict, movie_id: int = None, title: str = None) ->
     s = 'original_language_'+ff_df['original_language']
     ff_df[s] = 1
 
-    # Put context and fil features together
+    # Put context and film features together
     full_df = pd.concat([ff_df, context_df], axis=1)
     diff_cols = [x for x in full_df.columns if x not in rf_model_column_names]
     #print(f"Columns in full_df not in rf_model_column_names: {diff_cols}")

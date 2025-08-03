@@ -10,16 +10,17 @@ def search_movie(title):
     #movie_ids = [response["results"][i]['id'] for i in range(response['total_results'])]
     return response
 
-def get_movie_details(movie_id):
+def get_movie_details(movie_id: str):
     """Fetches full movie details from a given movie_id"""
-    return _client.get(f'movie/{movie_id}', params={'language': 'fr'})
+    response = _client.get(f'movie/{movie_id}', params={'language': 'fr'})
+    return response
 
 
-def find_best_match(title, known_runtime=0, top_n = 10, verbose = False):
+def find_best_match(title, known_runtime=90, top_n = 10, verbose = False):
     """
     Searches for a movie by title and finds the best match based on runtime.
     """
-    
+
     response = search_movie(title)
     num_results = len(response['results'])
     if verbose:
@@ -85,6 +86,8 @@ def find_best_match(title, known_runtime=0, top_n = 10, verbose = False):
         except HTTPError:
             print("unknown id:", id)
             print("unknown title:", top_n_movie_names[i])
+        if details is None or not bool(details):
+            continue
         runtime = details["runtime"]
         #print(runtime)
         diff = abs(runtime - known_runtime)
@@ -102,19 +105,27 @@ def find_best_match(title, known_runtime=0, top_n = 10, verbose = False):
 def get_movie_title(movie_id):
     """Fetches the title of a movie from a given movie_id"""
     details = get_movie_details(movie_id)
-    return details["title"]
+    if details is None or not bool(details):
+        title = None
+    else:
+        title = details["title"]
+    return title
 
 
 def get_genre_dict(): # TMDB Genre dictionary
     genre_dict = _client.get('genre/movie/list')
     return genre_dict['genres']
 
-def get_movie_features(movie_id):
+def get_movie_features(movie_id, return_duration = False):
     #adult, release year, genre ids, original_language, popularity, vote_average, runtime, origin_country
-    details = get_movie_details(movie_id)
+    
 
-    keep = {'adult', 'original_language', 'popularity', 'release_date', 'revenue', 'vote_average', 'genres'}
+    details = get_movie_details(movie_id)
+    keep = ['adult', 'original_language', 'popularity', 'release_date', 'revenue', 'vote_average', 'genres']
+    if return_duration:
+        keep.append('runtime')
     movie_features = {k: v for k, v in details.items() if k in keep}
+
     return movie_features
 
 

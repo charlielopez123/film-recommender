@@ -2,13 +2,14 @@
 import logging, requests
 from config import settings
 from requests.adapters import HTTPAdapter
+from requests.exceptions import HTTPError
 from urllib3.util.retry import Retry
 
 class APIClient:
     def __init__(self,
                  total_retries: int = 5,
                  backoff_factor: float = 1.0,
-                 status_forcelist: tuple = (429, 500, 502, 503, 504)):
+                 status_forcelist: tuple = (404, 429, 500, 502, 503, 504)):
         """
         Initializes a requests.Session with:
           - Authorization header
@@ -41,7 +42,13 @@ class APIClient:
         """
         Raise HTTPError on bad status and parse JSON response.
         """
-        resp.raise_for_status()       # Throw on 4xx/5xx
+        #if resp.status_code == 404:
+            # Resource not found — return None instead of raising
+            #return None
+        try:
+            resp.raise_for_status()       # Throw on 4xx/5xx
+        except HTTPError:
+            return {}
         return resp.json()            # Parse JSON or error
 
     def get(self, path, params=None):
