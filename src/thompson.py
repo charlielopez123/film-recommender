@@ -1,5 +1,7 @@
 # --- near the top of IL_training.py ---
 import numpy as np
+from pathlib import Path
+import pickle
 
 class ThompsonSampler:
     def __init__(self, dim, lam=1.0, sigma=1.0, prior_mean=None, seed = None):
@@ -65,3 +67,56 @@ class ThompsonSampler:
         """
         self.A += np.outer(x, x)
         self.b += r * x
+
+
+
+    def save(self, path: Path):
+        """
+        Save the sampler state to disk. Produces:
+          - <path>: .npz with numeric state
+          - <path>.rng.pkl : pickled RNG bit-generator state
+        """
+        path = Path(path)
+        np.savez(
+            path,
+            A=self.A,
+            b=self.b,
+            lam=np.array(self.lam),
+            sigma=np.array(self.sigma),
+            m0=self.m0,
+        )
+        # Save RNG state separately
+        rng_state = self.rng.bit_generator.state
+        with open(path.with_suffix(path.suffix + ".rng.pkl"), "wb") as f:
+            pickle.dump(rng_state, f)
+
+    @classmethod
+    def load(cls, path: Path):
+        """
+        Load a ThompsonSampler from disk (the .npz produced by save).
+        """
+        path = Path(path)
+        with np.load(path, allow_pickle=True) as data:
+            A = data["A"]
+            b = data["b"]
+            lam = float(data["lam"].item())
+            sigma = float(data["sigma"].item())
+            m0 = data["m0"]
+
+        dim = m0.shape[0]
+        sampler = cls(dim=dim, lam=lam, sigma=sigma, prior_mean=m0)
+        sampler.A = A
+        sampler.b = b
+
+        # Restore RNG if available
+        rng_file = path.with_suffix(path.suffix + ".rng.pkl")
+        if rng_file.exists():
+            with open(rng_file, "rb") as f:
+                state = pickle.load(f)
+            sampler.rng = np.random.default_rng()  # fresh generator
+            sampler.rng.bit_generator.state = state
+        else:
+            # fallback: new RNG (seed unspecified)
+            sampler.rng = np.random.default_rng()
+
+        return sampler

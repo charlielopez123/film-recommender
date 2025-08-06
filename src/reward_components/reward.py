@@ -57,7 +57,7 @@ class RewardCalculator:
         else:
             audience  = self._calculate_audience_reward(context, movie)
             audience_reshape = (audience).reshape(-1, 1)
- 
+
         rewards['audience'] = float(self.scaler_dict['rt_m'].transform(audience_reshape).squeeze())
             
         # 2. COMPETITIVE ADVANTAGE REWARD
@@ -181,6 +181,14 @@ class RewardCalculator:
     def _calculate_audience_reward(self, context, movie) -> float:
         """Calculate reward based on audience appeal factors"""
         model_input = self.build_model_input(context, movie)
+        
+        assert list(model_input.columns) == rf_model_column_names, (
+                f'difference in features:\n'
+                f'  only in model_input: '
+                f'{set(model_input.columns) - set(rf_model_column_names)}\n'
+                f'  only in rf_model: '
+                f'{set(rf_model_column_names) - set(model_input.columns)}'
+            )
         pred_audience_rating = self.audience_model.predict(model_input)
         
         return pred_audience_rating
@@ -348,7 +356,8 @@ class RewardCalculator:
             if pd.isna(days_since):
                 time_decay = 1.0
             else:
-                days_since = min(days_since, 365)
+                days_since = air_date - movie['date_last_diff']
+                days_since = min(days_since.days, 365)
                 time_decay = days_since / 365.0
             channel_score = rep_score * time_decay
 

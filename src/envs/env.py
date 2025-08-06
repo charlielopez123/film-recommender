@@ -4,15 +4,28 @@ from typing import Dict, List, Tuple, Optional, Union
 import random
 from datetime import datetime, timedelta
 from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler
+from sklearn.preprocessing import QuantileTransformer, MinMaxScaler, FunctionTransformer
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import make_pipeline
 from competition.competitor import CompetitorDataManager
 from reward_components.reward import RewardCalculator
 import sys
 from constants import *
 from envs.context import *
+import torch
 import utils
-from tqdm import tqdm
+from tqdm.notebook import tqdm
 from constants import rf_model_column_names
 import utils.date_formatting
+from contextual_thompson import ContextualThompsonSampler, sigmoid
+from model_architectures.curator import CuratorNetwork
+import warnings
+
+warnings.filterwarnings(
+    "ignore",
+    message="X does not have valid feature names, but SimpleImputer was fitted with feature names"
+)
+
 
 class TVProgrammingEnvironment:
     """
@@ -23,7 +36,9 @@ class TVProgrammingEnvironment:
                  movie_catalog: pd.DataFrame,  # Your TMDB DataFrame
                  historical_df: Optional[pd.DataFrame] = None,
                  reward_weights: Optional[Dict[str, float]] = None,
-                 audience_model: Optional[object] = None):
+                 audience_model: Optional[object] = None,
+                 cts_path: str = "models/ts_state.npz",
+                 curator_model_path = 'models/curator_model.pth'):
         title_to_id = movie_catalog.set_index('title')['catalog_id'].to_dict()
 
         self.movie_catalog = movie_catalog.set_index('catalog_id')
@@ -34,9 +49,8 @@ class TVProgrammingEnvironment:
         self.memory = []
         self.active_channel = 'RTS 1'
         self.available_movies = self.movie_catalog.copy().index.tolist()
-
-
-        
+        self.context_dim = 16
+        self.movie_dim = 24
 
         # Competitor data manager
         self.competition_historical_df = self.historical_df[self.historical_df['channel'].isin(COMPETITOR_CHANNELS)]
@@ -45,6 +59,7 @@ class TVProgrammingEnvironment:
 
 
         print("Setting up Scalers...")
+        """
         self.scaler_dict = {
         "revenue": StandardScaler().fit(self.movie_catalog[['revenue']]), # Scaler expects on 2D array
         "vote_average": StandardScaler().fit(self.movie_catalog[['vote_average']]),
@@ -52,6 +67,28 @@ class TVProgrammingEnvironment:
         "duration": StandardScaler().fit(self.movie_catalog[['duration_min']]),
         "movie_age": RobustScaler().fit(self.movie_catalog[['movie_age']]),
         "rt_m": MinMaxScaler().fit(self.historical_df[['rt_m']]),
+        }
+        """
+
+        self.scaler_dict = {
+            "revenue": make_safe_positive_pipeline(log_compress=True).fit(
+                self.movie_catalog[["revenue"]].replace([np.inf, -np.inf], np.nan)
+            ),
+            "popularity": make_safe_positive_pipeline(log_compress=True).fit(
+                self.movie_catalog[["popularity"]].replace([np.inf, -np.inf], np.nan)
+            ),
+            "movie_age": make_safe_positive_pipeline(log_compress=True).fit(
+                self.movie_catalog[["movie_age"]].replace([np.inf, -np.inf], np.nan)
+            ),
+            "duration": make_safe_positive_pipeline(log_compress=False).fit(
+                self.movie_catalog[["duration_min"]].replace([np.inf, -np.inf], np.nan)
+            ),
+            "vote_average": make_safe_positive_pipeline(log_compress=False).fit(
+                self.movie_catalog[["vote_average"]].replace([np.inf, -np.inf], np.nan)
+            ),  # or MinMaxScaler if you prefer
+            "rt_m": make_safe_positive_pipeline(log_compress=True).fit(
+                self.historical_df[["rt_m"]].replace([np.inf, -np.inf], np.nan)
+            ),
         }
 
         # Reward Calculator
@@ -80,9 +117,18 @@ class TVProgrammingEnvironment:
         # State tracking
         self.context_features_cache = {}
 
-        
-        
-    def get_available_movies(self, date, context: Context) -> List[str]:
+        # Setup Contextual Thompson Sampler
+        print("Setting up ContextualThompsonSampler...")
+        self.cts = ContextualThompsonSampler.load(Path(cts_path))
+
+        # Setup Curator Network
+        print("Setting up CuratorNetwork...")
+        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        self.curator_model = CuratorNetwork(context_dim = self.context_dim, movie_dim = self.movie_dim).to(self.device)
+        self.curator_model.load_state_dict(torch.load(curator_model_path))
+
+   
+    def get_available_movies(self, date: datetime, context: Context) -> List[str]:
         """Get movies available for the given context (rights not expired)"""
         # Assuming your DataFrame has 'rights_expiry' column as datetime
         #available_mask = self.movie_catalog['rights_expiry'] > self.current_date
@@ -94,8 +140,7 @@ class TVProgrammingEnvironment:
                             (self.movie_catalog['start_rights'] < date) &
                             (self.movie_catalog['available_num_diff'] > 0)
                             )
-
-        return self.movie_catalog[available_mask].index.tolist()
+        self.available_movies = self.movie_catalog[available_mask].index.tolist()
     
     def get_context_features(self, context: Union[Context, Tuple]) -> np.ndarray:
 
@@ -241,7 +286,7 @@ class TVProgrammingEnvironment:
                 # Scaler expects on 2D array
                 'norm_revenue': self.scaler_dict['revenue'].transform([[movie.revenue]])[0][0],  # normalized revenue
                 'norm_vote_avg':self.scaler_dict['vote_average'].transform([[movie.vote_average]])[0][0],  # normalized voting average
-                #'norm_popularity': self.scaler_dict['popularity'].transform([[movie.popularity]])[0][0],  # normalized popularity
+                'norm_popularity': self.scaler_dict['popularity'].transform([[movie.popularity]])[0][0],  # normalized popularity
                 'norm_duration': self.scaler_dict['duration'].transform([[movie.duration_min]])[0][0],  # normalized runtime
                 'norm_movie_age': self.scaler_dict['movie_age'].transform([[movie.movie_age]])[0][0],  # normalized age
                 }, index=[0])
@@ -310,6 +355,47 @@ class TVProgrammingEnvironment:
             _, rewards = self.reward.calculate_total_reward(movie, context, air_date)
             reward_features = np.array([reward for reward in rewards.values()])
             ensemble = np.concatenate((interaction_features, reward_features)).tolist()
+            movies.append(movie)
+            X_cands.append(ensemble)
+
+            #print(context_f.shape, movie_f.shape, reward_features.shape)
+        return movies, np.array(X_cands)
+    
+    def get_candidate_features_cts_cur(self, context: Context, air_date: str):
+        X_cands = []
+        movies = []
+        #self.available_movies = self.get_available_movies(air_date, context)
+        context_f, _ = self.get_context_features(context)
+        context_tensor = torch.from_numpy(context_f).unsqueeze(0)
+        
+
+        for movie in tqdm(self.available_movies, leave=True, desc = "Movies"):
+            movie_f = self.get_movie_features(movie)
+            movie_tensor = torch.from_numpy(movie_f).unsqueeze(0)
+
+            with torch.no_grad():  # no grad for inference
+                selection_prob = torch.Tensor.numpy(self.curator_model(context_tensor, movie_tensor))
+                
+            _, rewards = self.reward.calculate_total_reward(movie, context, air_date)
+            reward_features = np.array([reward for reward in rewards.values()])
+            ensemble = np.concatenate((selection_prob.reshape(1,), reward_features)).tolist()
+            movies.append(movie)
+            X_cands.append(ensemble)
+
+            #print(context_f.shape, movie_f.shape, reward_features.shape)
+        return movies, np.array(X_cands)
+    
+    def get_candidate_features_cts_old(self, context: Context, air_date: str):
+        X_cands = []
+        movies = []
+        self.available_movies = self.get_available_movies(air_date, context)
+
+        for movie in tqdm(self.available_movies):
+            movie_f = self.get_movie_features(movie)
+
+            _, rewards = self.reward.calculate_total_reward(movie, context, air_date)
+            reward_features = np.array([reward for reward in rewards.values()])
+            ensemble = np.concatenate((movie_f, reward_features)).tolist()
             movies.append(movie)
             X_cands.append(ensemble)
 
@@ -521,9 +607,6 @@ class TVProgrammingEnvironment:
             return None  # outside defined slots
         
 
-
-
-
     def build_context_movie_interactions(
         self,
         context_feat: np.ndarray,  # shape (C,)
@@ -583,3 +666,80 @@ class TVProgrammingEnvironment:
 
         interaction_vector = np.array(interaction_vals, dtype=np.float32)
         return interaction_vector, interaction_names
+
+    ## Contextual Thompson Sampling functions
+    def recommend_n_films(self, context, air_date):
+        # movies: list of movie IDs, X_cands: Mxd numpy array
+        # Thompson‐Sampling selects one
+        print('Getting candidate features...')
+        context_f, _ = self.get_context_features(context)
+        movies, X_cands = self.get_candidate_features_cts_cur(context, air_date)
+        print('Done')
+        top5_idx, top5_scores, w_tilde, _ = self.cts.score_candidates(context_f, X_cands, K=5)
+        recommended = [movies[i] for i in top5_idx]
+
+        for movie, score in zip(recommended, top5_scores):
+            print(f"{movie}: score = {score:.3f}")
+
+        return recommended, top5_idx, top5_scores, w_tilde, movies, X_cands
+    
+    def show_top_breakdown(self, top5_idx, top5_scores, w_tilde, movies, X_cands):
+        eps = 1e-9  # threshold to consider "non-zero"
+        for i, idx in enumerate(top5_idx):
+            movie_id = movies[idx]
+            x = X_cands[idx]
+            total = top5_scores[i]
+            print(f"\n🎬 {movie_id}: {self.movie_catalog.loc[movie_id]['title']}  (total score = {total:.3f}) (p = {sigmoid(total)})")
+            print(f"\n Actors: {self.movie_catalog.loc[movie_id]['actors']}")
+            print("  Breakdown:")
+
+            # build list of (name, xi, wi, contribution)
+            contribs = [
+                (name, float(xi), float(wi), float(xi * wi))
+                for name, xi, wi in zip(all_reward_feature_names, x, w_tilde)
+            ]
+            # filter out negligible contributions
+            nonzero = [t for t in contribs if abs(t[3]) > eps]
+            # sort by absolute impact (change to key=lambda t: -t[3] if you want signed descending)
+            nonzero.sort(key=lambda t: t[3], reverse=True)
+
+            for name, xi, wi, contrib in nonzero:
+                sign = "+" if contrib >= 0 else "-"
+                print(f"    • {name:30s} {xi:6.3f} × {wi:6.3f} = {contrib:7.3f} ({sign})")
+
+    def get_context_features_from_date_hour(self, date: str, hour: int):
+        air_date = utils.date_formatting.to_datetime_format(date)
+        context = self.create_context_from_date(date, hour)
+        context_f, _ = self.get_context_features(context)
+        return context_f, context, air_date
+    
+    def encode_chosen_signals(self, chosen_signals_str: str, all_signals: List = y_signal_feature_selection):
+        """
+        all_signals: list of feature names, e.g. ['cur','aud','comp','div','nov','rights']
+        chosen_signals_str: space-separated string, e.g. "aud cur rights"
+        Returns: np.ndarray of 0/1 of length len(all_signals)
+        """
+        chosen_set = set(chosen_signals_str.split())
+        return np.array([1 if sig in chosen_set else 0 for sig in all_signals], dtype=int)
+
+
+        
+def safe_log1p(X):
+    X = np.asarray(X, dtype=float)
+    # Replace infinities with NaN so imputer can handle them upstream if needed
+    X[~np.isfinite(X)] = np.nan
+    # Clip negatives to zero (since data should be naturally positive)
+    X = np.clip(X, 0, None)
+    # log1p is now safe
+    return np.log1p(X)
+
+def make_safe_positive_pipeline(log_compress: bool = True):
+    steps = []
+    # 1. Impute missing / replaced inf values
+    steps.append(("impute", SimpleImputer(strategy="median")))
+    # 2. Optional safe log compress for heavy-tailed positives
+    if log_compress:
+        steps.append(("safe_log1p", FunctionTransformer(safe_log1p, validate=False)))
+    # 3. Rank-based mapping to uniform [0,1], robust to outliers
+    steps.append(("quantile", QuantileTransformer(output_distribution="uniform", random_state=0, copy=True)))
+    return make_pipeline(*[step for _, step in steps])

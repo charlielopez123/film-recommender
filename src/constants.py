@@ -109,3 +109,12 @@ movie_feature_names = ['norm_revenue',
        'genre_Horreur', 'genre_Musique', 'genre_Mystère', 'genre_Romance',
        'genre_Science-Fiction', 'genre_Thriller', 'genre_Téléfilm',
        'genre_Western']
+
+all_reward_feature_names =['curator_select_prob',
+                            'reward_audience',
+                            'reward_competition',
+                            'reward_diversity',
+                            'reward_novelty',
+                            'reward_rights']
+
+y_signal_feature_selection = ['cur', 'aud', 'comp', 'div', 'nov', 'rights']

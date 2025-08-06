@@ -4,7 +4,7 @@ from envs.env import Context, TimeSlot, Season, TVProgrammingEnvironment
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, accuracy_score
@@ -54,17 +54,18 @@ class HistoricalDataProcessor:
     """
     
     def __init__(self, 
-                 environment: TVProgrammingEnvironment):
+                 environment: TVProgrammingEnvironment,
+                 gamma = 0.6):
         self.env = environment
         self.historical_df = self.env.historical_df
-        self.gamma = 0.6
+        self.gamma = gamma
         
         #competition_historical_data = historical_df[historical_df['channel'].str.contains('competitor', case=False)]
 
 
     def prepare_training_data(self, 
                             channel_name: str = "RTS 1",
-                            negative_sampling_ratio: float = 0,
+                            negative_sampling_ratio: float = 5,
                             time_split_date: str = None) -> Dict:
         """
         Prepare training data from historical programming decisions
@@ -111,14 +112,10 @@ class HistoricalDataProcessor:
                 copy = self.historical_df.copy()
                 available_historical_data = copy[utils.date_formatting.to_datetime_format(copy['date']) <= air_date]
 
-                available_movies = self.env.get_available_movies(air_date, context)
-                self.env.available_movies = available_movies # Update environment's available movies
+                self.env.get_available_movies(air_date, context) # Update environment's available movies
 
                 # Get movie features
-                movie_id = row['tmdb_id']
-                #print(f'row name:{movie_id}')
-                
-                
+                movie_id = row['catalog_id']
                 
                 # Check if movie exists in catalog
                 try:
@@ -126,6 +123,11 @@ class HistoricalDataProcessor:
                 except KeyError: # If movie not found in catalog add it
                     movies_not_found.append(row.name)
                     self._add_missing_movie_to_catalog(movie_id, row)
+
+                if movie_id == '-1':
+                    movies_not_found.append(row.name)
+                    self._add_missing_movie_to_catalog(movie_id, row)
+
                     
                 
                 self.env.update_memory(movie_id) # Store movie ID in memory
@@ -134,10 +136,8 @@ class HistoricalDataProcessor:
                     self.env.movie_catalog.loc[movie_id, 'times_shown'] = 0
                 else:
                     show_cols = ['date_diff_1', 'date_rediff_1', 'date_rediff_2', 'date_rediff_3', 'date_rediff_4']
-                    for c in show_cols:
-                        self.env.movie_catalog.loc[movie_id, c] = pd.to_datetime(self.env.movie_catalog.loc[movie_id, c] , errors="coerce")
                     mask = self.env.movie_catalog.loc[movie_id, show_cols].lt(air_date)
-                    self.env.movie_catalog.loc[movie_id, "times_shown"] = mask.sum(axis=1)
+                    self.env.movie_catalog.loc[movie_id, "times_shown"] = mask.sum()
                 
                 if movie_id not in self.env.movie_catalog.index:
                     print(f"Movie ID {movie_id} not found in catalog, skipping row")
@@ -219,7 +219,7 @@ class HistoricalDataProcessor:
                 'current_memories': current_memories[~train_mask]
             }
             
-            return {'train': train_data, 'val': val_data}
+            return {'train': train_data, 'val': val_data}, all_rewards, movies_not_found
         
         else:
             return {
@@ -317,8 +317,8 @@ class HistoricalDataProcessor:
         partial_new_entry = {}
         # Check if historical row already contains tmdb data
         if historical_row['missing_tmdb_id'] is False:
-            partial_new_entry['catalog_id'] =  historical_row.get('tmdb_id')
-            movie_features = tmdb.get_movie_features(movie_id)
+            partial_new_entry['catalog_id'] =  str(int(historical_row.get('tmdb_id')))
+            movie_features = tmdb.get_movie_features(historical_row.get('tmdb_id'))
             partial_new_entry |= movie_features
         else:
             missing_mask = self.env.movie_catalog['missing_tmdb'] == True
@@ -335,7 +335,7 @@ class HistoricalDataProcessor:
             'times_shown': 0,
         }
 
-        row = pd.Series(partial_new_entry, name=movie_id).reindex(self.env.movie_catalog.columns) # create catalog row from partial entry
+        row = pd.Series(partial_new_entry, name=partial_new_entry['catalog_id']).reindex(self.env.movie_catalog.columns) # create catalog row from partial entry
 
         row= pd.DataFrame(row).T
         row = utils.preprocessing.preprocess_featured_movies(row)
@@ -357,7 +357,10 @@ class NetworkTrainer:
                             validation_data: Optional[Dict] = None,
                             epochs: int = 100,
                             batch_size: int = 256,
-                            learning_rate: float = 0.001) -> CuratorNetwork:
+                            learning_rate: float = 0.001,
+                            early_stopping_patience: int = 10,
+                            min_delta: float = 1e-4
+                            ) -> CuratorNetwork:
         """Train the Curator Network using behavioral cloning"""
         
         print("Training Curator Network...")
@@ -369,8 +372,25 @@ class NetworkTrainer:
             training_data['curator_targets'],
             target_type='binary'
         )
+
+        labels = train_dataset.targets
+        class_sample_count = np.bincount(labels)
+        weight_per_class = 1. / class_sample_count
+        weights = weight_per_class[labels]
+        sampler = WeightedRandomSampler(weights, len(weights), replacement=True)
         
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=sampler)
+
+        if validation_data is not None:
+            val_dataset = HistoricalProgrammingDataset(
+                validation_data['context_features'],
+                validation_data['movie_features'],
+                validation_data['curator_targets'],
+                target_type='binary'
+            )
+            val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=True)
+        else:
+            val_loader = None
         
         # Initialize model
         context_dim = training_data['context_features'].shape[1]
@@ -382,6 +402,12 @@ class NetworkTrainer:
         criterion = nn.BCELoss()
         optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-5)
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=10, factor=0.5)
+
+        best_val_loss = float("inf")
+        best_val_acc = float("inf")
+        epochs_no_improve = 0
+        best_state = None
+
         
         # Training loop
         train_losses = []
@@ -411,23 +437,54 @@ class NetworkTrainer:
                 
                 epoch_loss += loss.item()
             
-            avg_loss = epoch_loss / len(train_loader)
-            train_losses.append(avg_loss)
+            avg_train_loss = epoch_loss / len(train_loader)
+                
+            train_losses.append(avg_train_loss)
             
             # Validation
-            if validation_data is not None:
+            if val_loader is not None:
+                model.eval()
+                val_loss_accum = 0.0
+                with torch.no_grad():
+                    for batch in val_loader:
+                        context = batch['context'].to(self.device)
+                        movie = batch['movie'].to(self.device)
+                        targets = batch['target'].float().to(self.device)
+                        
+                        preds = model(context, movie)
+                        loss = criterion(preds, targets)
+                        val_loss_accum += loss.item()
                 val_acc = self._evaluate_curator(model, validation_data, batch_size)
                 val_accuracies.append(val_acc)
-                scheduler.step(1 - val_acc)  # Maximize accuracy
-                
-                if epoch % 10 == 0:
-                    print(f"Epoch {epoch}: Loss={avg_loss:.4f}, Val Acc={val_acc:.4f}")
+
+                avg_val_loss = val_loss_accum / len(val_loader)
+
+                scheduler.step(avg_val_loss)
+
+                improved = avg_val_loss + min_delta < best_val_loss
+                if improved:
+                    best_val_loss = avg_val_loss
+                    best_val_acc = val_acc
+                    epochs_no_improve = 0
+                    best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+                else:
+                    epochs_no_improve += 1
+                if epoch % 10 == 0 or epoch == 1:
+                    print(f"[Reward] Epoch {epoch:03d}: Train Loss={avg_train_loss:.4f}, Val Loss={avg_val_loss:.4f} (no_improve={epochs_no_improve})")
+
+                if epochs_no_improve >= early_stopping_patience:
+                    print(f"[Reward] Early stopping triggered at epoch {epoch}. Best Val Loss={best_val_loss:.4f}")
+                    break
             else:
-                scheduler.step(avg_loss)
-                if epoch % 10 == 0:
-                    print(f"Epoch {epoch}: Loss={avg_loss:.4f}")
+                scheduler.step(avg_train_loss)
+                if epoch % 10 == 0 or epoch == 1:
+                    print(f"[Reward] Epoch {epoch:03d}: Train Loss={avg_train_loss:.4f}")
         
-        print("Curator Network training completed!")
+        if best_state is not None:
+            model.load_state_dict(best_state)
+            print(f"[Reward] Loaded best model with Val Loss={best_val_loss:.4f} and Accuracy={best_val_acc:.4f}")
+        
+        print("Reward Model training completed!")
         return model
     
     def train_reward_model(self,
