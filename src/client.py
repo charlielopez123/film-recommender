@@ -59,3 +59,13 @@ class APIClient:
         logging.debug("GET %s %s", url, params)
         resp = self.session.get(url, params=params, timeout=10)
         return self._handle_response(resp)
+    
+
+    def get_images(self, images_base_url, poster_path):
+        """
+        Perform a GET request to the TMDb API, returning parsed JSON.
+        """
+        url = f"{images_base_url.rstrip('/')}/{poster_path.lstrip('/')}"
+        logging.debug("GET %s", url)
+        resp = self.session.get(url, timeout=10)
+        return self._handle_response(resp)

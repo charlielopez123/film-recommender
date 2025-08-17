@@ -37,8 +37,10 @@ class TVProgrammingEnvironment:
                  historical_df: Optional[pd.DataFrame] = None,
                  reward_weights: Optional[Dict[str, float]] = None,
                  audience_model: Optional[object] = None,
-                 cts_path: str = "models/ts_state.npz",
+                 cts_path: str = "models/ts_state_tick_match.npz",
                  curator_model_path = 'models/curator_model.pth'):
+        
+        
         title_to_id = movie_catalog.set_index('title')['catalog_id'].to_dict()
 
         self.movie_catalog = movie_catalog.set_index('catalog_id')
@@ -128,7 +130,7 @@ class TVProgrammingEnvironment:
         self.curator_model.load_state_dict(torch.load(curator_model_path))
 
    
-    def get_available_movies(self, date: datetime, context: Context) -> List[str]:
+    def get_available_movies(self, date: datetime, context: Context):
         """Get movies available for the given context (rights not expired)"""
         # Assuming your DataFrame has 'rights_expiry' column as datetime
         #available_mask = self.movie_catalog['rights_expiry'] > self.current_date
@@ -668,7 +670,7 @@ class TVProgrammingEnvironment:
         return interaction_vector, interaction_names
 
     ## Contextual Thompson Sampling functions
-    def recommend_n_films(self, context, air_date):
+    def recommend_n_films(self, context: Context, air_date: datetime):
         # movies: list of movie IDs, X_cands: Mxd numpy array
         # Thompson‐Sampling selects one
         print('Getting candidate features...')

@@ -1,6 +1,7 @@
 from client import APIClient
 from requests.exceptions import HTTPError
 from utils.text_cleaning import normalize
+import numpy as np
 
 _client = APIClient()
 
@@ -147,3 +148,51 @@ def find_best_id_decomposed(title, known_runtime):
 
     # give up
     return None
+
+
+def get_movie_poster_path(movie_id, width = 200):
+    # Sometimes works with certain width sometimes the exact corresponding one, yesterday it worked one way, the other not
+    if movie_id is None or (isinstance(movie_id, float) and np.isnan(movie_id)):
+        return None
+    
+    details = get_movie_details(movie_id)
+
+    try:
+        poster_path = details.get('poster_path') # get poster path corresponding to the movie
+    except:
+        print(poster_path)
+
+    if not poster_path:
+        return None
+    #movie_images = get_movie_images(movie_id) # Search for poster path in all movie images to find the width of the image, necessary for api call
+    #posters = movie_images['posters']
+    #found = False
+    #for poster in posters:
+    #    if poster_path in poster['file_path']:
+    #        poster_path = poster['width'] + poster_path
+    #        found = True
+    #        break
+    
+    #if not found:
+    #    pass
+
+    # Retrieve base url for images
+    #configuration = get_config_details()
+    #images_base_url = configuration['images']['base_url']
+    images_base_url = "http://image.tmdb.org/t/p/"
+
+    poster_path = f'w{width}/poster_path'
+    full_poster_path = f"{images_base_url.rstrip('/')}/{poster_path.lstrip('/')}"
+    return full_poster_path
+
+    #_client.get_images(images_base_url, full_poster_path)
+
+
+
+def get_movie_images(movie_id):
+    response = _client.get(f'movie/{movie_id}/images')
+    return response
+
+def get_config_details():
+    response = _client.get('configuration')
+    return response
